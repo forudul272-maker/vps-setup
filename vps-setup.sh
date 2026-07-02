@@ -136,7 +136,21 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 app = Flask(__name__)
 app.secret_key = "ssh-panel-secret-key-super-secure"
 
+CONFIG_FILE = "/etc/ssh-panel/config.json"
 BANDWIDTH_FILE = "/etc/ssh-panel/bandwidth.json"
+
+def load_config():
+    if not os.path.exists(CONFIG_FILE):
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        default_conf = {"username": "admin", "password": "admin123", "port": 40460}
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(default_conf, f, indent=4)
+        return default_conf
+    try:
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {"username": "admin", "password": "admin123", "port": 40460}
 
 def load_bandwidth():
     if not os.path.exists(BANDWIDTH_FILE):
@@ -156,26 +170,15 @@ def save_bandwidth(data):
         print(f"Error saving bandwidth: {e}")
 
 def get_users_bandwidth(usernames):
-    current_iptables = {}
-    
-    def parse_tool(tool_name):
-        try:
-            out = subprocess.check_output(f"{tool_name} -nvx -L OUTPUT", shell=True).decode()
-            for line in out.split("\\n"):
-                if "owner UID match" in line:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        bytes_count = int(parts[1])
-                        uid_str = parts[-1]
-                        current_iptables[uid_str] = current_iptables.get(uid_str, 0) + bytes_count
-        except Exception as e:
-            pass
-
-    parse_tool("iptables")
-    parse_tool("ip6tables")
-
     db = load_bandwidth()
     updated = False
+
+    # Initialize connmark core rules
+    for tool in ["iptables", "ip6tables"]:
+        for chain in ["PREROUTING", "OUTPUT"]:
+            check_restore = f"{tool} -t mangle -C {chain} -j CONNMARK --restore-mark 2>/dev/null"
+            if subprocess.call(check_restore, shell=True) != 0:
+                subprocess.call(f"{tool} -t mangle -I {chain} 1 -j CONNMARK --restore-mark", shell=True)
 
     for user in usernames:
         uid = ""
@@ -184,17 +187,40 @@ def get_users_bandwidth(usernames):
         except Exception:
             pass
 
-        iptables_val = current_iptables.get(user)
-        if iptables_val is None and uid:
-            iptables_val = current_iptables.get(uid)
+        if not uid:
+            continue
 
-        if iptables_val is None:
-            try:
-                subprocess.call(f"iptables -I OUTPUT -m owner --uid-owner {user}", shell=True)
-                subprocess.call(f"ip6tables -I OUTPUT -m owner --uid-owner {user}", shell=True)
-            except Exception:
-                pass
-            iptables_val = 0
+        # Check and add user accounting rules
+        for tool in ["iptables", "ip6tables"]:
+            # Mangle set-mark rule
+            check_mangle = f"{tool} -t mangle -C OUTPUT -m owner --uid-owner {user} -j CONNMARK --set-mark {uid} 2>/dev/null"
+            if subprocess.call(check_mangle, shell=True) != 0:
+                subprocess.call(f"{tool} -t mangle -A OUTPUT -m owner --uid-owner {user} -j CONNMARK --set-mark {uid}", shell=True)
+            
+            # INPUT counter
+            check_input = f"{tool} -C INPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{user}' 2>/dev/null"
+            if subprocess.call(check_input, shell=True) != 0:
+                subprocess.call(f"{tool} -I INPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{user}'", shell=True)
+                
+            # OUTPUT counter
+            check_output = f"{tool} -C OUTPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{user}' 2>/dev/null"
+            if subprocess.call(check_output, shell=True) != 0:
+                subprocess.call(f"{tool} -I OUTPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{user}'", shell=True)
+
+        # Retrieve bytes count from counters
+        bytes_count = 0
+        search_str = f"ssh-panel:{user}"
+        for tool in ["iptables", "ip6tables"]:
+            for chain in ["INPUT", "OUTPUT"]:
+                try:
+                    out = subprocess.check_output(f"{tool} -nvx -L {chain}", shell=True).decode()
+                    for line in out.splitlines():
+                        if search_str in line:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                bytes_count += int(parts[1])
+                except Exception:
+                    pass
 
         if user not in db:
             db[user] = {"accumulated": 0, "last_val": 0}
@@ -204,18 +230,18 @@ def get_users_bandwidth(usernames):
         last_val = user_data.get("last_val", 0)
         accumulated = user_data.get("accumulated", 0)
 
-        if iptables_val >= last_val:
-            diff = iptables_val - last_val
+        if bytes_count >= last_val:
+            diff = bytes_count - last_val
             if diff > 0:
                 accumulated += diff
                 user_data["accumulated"] = accumulated
                 updated = True
         else:
-            accumulated += iptables_val
+            accumulated += bytes_count
             user_data["accumulated"] = accumulated
             updated = True
 
-        user_data["last_val"] = iptables_val
+        user_data["last_val"] = bytes_count
 
     if updated:
         save_bandwidth(db)
@@ -233,21 +259,6 @@ def get_users_bandwidth(usernames):
             formatted[user] = f"{bytes_used} B"
             
     return formatted
-
-CONFIG_FILE = "/etc/ssh-panel/config.json"
-
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        default_conf = {"username": "admin", "password": "admin123", "port": 40460}
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(default_conf, f, indent=4)
-        return default_conf
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {"username": "admin", "password": "admin123", "port": 40460}
 
 def get_system_stats():
     stats = {"cpu": 0, "ram": 0, "disk": 0, "uptime": "N/A", "network": "0 B", "total_ssh_bandwidth": "0 B"}
@@ -327,7 +338,7 @@ def get_users_list():
                     expiry = "Never"
                     try:
                         chage_out = subprocess.check_output(f"chage -l {username}", shell=True).decode()
-                        for cl in chage_out.split("\n"):
+                        for cl in chage_out.splitlines():
                             if "Account expires" in cl:
                                 expiry = cl.split(":", 1)[1].strip()
                                 break
@@ -345,7 +356,7 @@ def get_users_list():
                     sessions = 0
                     try:
                         who_out = subprocess.check_output("who", shell=True).decode()
-                        for wl in who_out.split("\n"):
+                        for wl in who_out.splitlines():
                             if wl.startswith(username):
                                 sessions += 1
                     except Exception:
@@ -358,7 +369,6 @@ def get_users_list():
                         "sessions": sessions
                     })
         
-        # Add bandwidth info
         bandwidths = get_users_bandwidth(usernames)
         for u in raw_users:
             u["bandwidth"] = bandwidths.get(u["username"], "0 B")
@@ -441,12 +451,21 @@ def api_delete_user():
         return jsonify({"error": "Username required"}), 400
         
     try:
+        uid = ""
+        try:
+            uid = subprocess.check_output(f"id -u {username}", shell=True).decode().strip()
+        except Exception:
+            pass
+
         subprocess.call(f"pkill -u {username} 2>/dev/null", shell=True)
         subprocess.check_call(f"userdel -r {username}", shell=True)
         
         # Clean up iptables and ip6tables rules
-        subprocess.call(f"iptables -D OUTPUT -m owner --uid-owner {username} 2>/dev/null", shell=True)
-        subprocess.call(f"ip6tables -D OUTPUT -m owner --uid-owner {username} 2>/dev/null", shell=True)
+        if uid:
+            for tool in ["iptables", "ip6tables"]:
+                subprocess.call(f"{tool} -t mangle -D OUTPUT -m owner --uid-owner {username} -j CONNMARK --set-mark {uid} 2>/dev/null", shell=True)
+                subprocess.call(f"{tool} -D INPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{username}' 2>/dev/null", shell=True)
+                subprocess.call(f"{tool} -D OUTPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{username}' 2>/dev/null", shell=True)
         
         # Clean up bandwidth JSON database
         db = load_bandwidth()
@@ -522,6 +541,7 @@ def api_set_expiry():
 if __name__ == "__main__":
     conf = load_config()
     app.run(host="0.0.0.0", port=conf["port"])
+
 EOF
 
     # 2. Create login.html
