@@ -1588,7 +1588,11 @@ EOF
         <div class="header">
             <div class="brand">
                 <h1>SSH-UI</h1>
-                <p>Admin Control Dashboard</p>
+                <p style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span>Admin Control Dashboard</span>
+                    <span style="color: rgba(255,255,255,0.15); display: inline-block;">|</span>
+                    <span style="color: var(--secondary-color); font-weight: 600; letter-spacing: 0.5px; text-shadow: 0 0 10px rgba(0, 229, 255, 0.3);">SCRIPT BY FORIDUL</span>
+                </p>
             </div>
             <div class="header-actions">
                 <button class="btn btn-secondary" onclick="fetchUsers()"><i class="fa-solid fa-rotate"></i> Refresh</button>
