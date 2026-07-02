@@ -1591,14 +1591,6 @@ EOF
             </div>
             <form id="configForm" onsubmit="saveConfig(event)">
                 <div class="form-group">
-                    <label>Panel Username</label>
-                    <input type="text" id="cfg-username" class="form-control" required autocomplete="off">
-                </div>
-                <div class="form-group">
-                    <label>Panel Password</label>
-                    <input type="password" id="cfg-password" class="form-control" required>
-                </div>
-                <div class="form-group">
                     <label>Panel Web Port</label>
                     <input type="number" id="cfg-port" class="form-control" required>
                 </div>
@@ -1611,8 +1603,16 @@ EOF
                     <input type="number" id="cfg-ssh" class="form-control" required>
                 </div>
                 <div class="form-group">
+                    <label>Dropbear Ports (comma separated)</label>
+                    <input type="text" id="cfg-dropbear" class="form-control" required autocomplete="off">
+                </div>
+                <div class="form-group">
                     <label>SSL Port (Stunnel)</label>
                     <input type="number" id="cfg-ssl" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>SSL WS Port (Stunnel)</label>
+                    <input type="number" id="cfg-ssl-ws" class="form-control" required>
                 </div>
                 <div class="form-group">
                     <label>WebSocket Port</label>
@@ -1701,12 +1701,12 @@ EOF
         }
 
         function openConfigModal() {
-            document.getElementById('cfg-username').value = serverConfig.username || 'admin';
-            document.getElementById('cfg-password').value = serverConfig.password || '';
             document.getElementById('cfg-port').value = serverConfig.port || 40460;
             document.getElementById('cfg-host').value = serverConfig.host || '';
             document.getElementById('cfg-ssh').value = serverConfig.ssh_port || 22;
+            document.getElementById('cfg-dropbear').value = serverConfig.dropbear_ports || '144, 109, 50000';
             document.getElementById('cfg-ssl').value = serverConfig.ssl_port || 443;
+            document.getElementById('cfg-ssl-ws').value = serverConfig.ssl_ws_port || 2083;
             document.getElementById('cfg-ws').value = serverConfig.ws_port || 143;
             document.getElementById('cfg-udp').value = serverConfig.udp_port || 7300;
             openModal('configModal');
@@ -1715,12 +1715,12 @@ EOF
         async function saveConfig(e) {
             e.preventDefault();
             const payload = {
-                username: document.getElementById('cfg-username').value,
-                password: document.getElementById('cfg-password').value,
                 port: parseInt(document.getElementById('cfg-port').value),
                 host: document.getElementById('cfg-host').value,
                 ssh_port: parseInt(document.getElementById('cfg-ssh').value),
+                dropbear_ports: document.getElementById('cfg-dropbear').value,
                 ssl_port: parseInt(document.getElementById('cfg-ssl').value),
+                ssl_ws_port: parseInt(document.getElementById('cfg-ssl-ws').value),
                 ws_port: parseInt(document.getElementById('cfg-ws').value),
                 udp_port: parseInt(document.getElementById('cfg-udp').value)
             };
@@ -1958,11 +1958,13 @@ EOF
         function shareUser(username) {
             const host = serverConfig.host || window.location.hostname;
             const port = serverConfig.ssh_port || 22; 
+            const dbPorts = serverConfig.dropbear_ports || '144, 109, 50000';
             const wsPort = serverConfig.ws_port || 143;
             const sslPort = serverConfig.ssl_port || 443;
+            const sslWsPort = serverConfig.ssl_ws_port || 2083;
             const udpPort = serverConfig.udp_port || 7300;
             
-            const configText = `Host: ${host}\nSSH Port: ${port}\nWS Port: ${wsPort}\nSSL Port: ${sslPort}\nUDP GW Port: ${udpPort}\nUsername: ${username}`;
+            const configText = `Host: ${host}\nSSH Port: ${port}\nDropbear Ports: ${dbPorts}\nWS Port: ${wsPort}\nSSL Port (SSH): ${sslPort}\nSSL Port (WS): ${sslWsPort}\nUDP GW Port: ${udpPort}\nUsername: ${username}`;
             
             document.getElementById('share-text').innerText = configText;
             
