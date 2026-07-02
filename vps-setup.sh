@@ -149,7 +149,9 @@ def load_config():
         "port": 40460,
         "host": "free-vps.foridul.store",
         "ssh_port": 22,
+        "dropbear_ports": "144, 109, 50000",
         "ssl_port": 443,
+        "ssl_ws_port": 2083,
         "ws_port": 143,
         "udp_port": 7300
     }
@@ -206,6 +208,161 @@ def save_user_limits(data):
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"Error saving user limits: {e}")
+
+def apply_system_ports(old, new):
+    changed = False
+    
+    # 1. Update OpenSSH Port if changed
+    ssh_port_changed = old.get("ssh_port") != new.get("ssh_port")
+    if ssh_port_changed:
+        sshd_path = "/etc/ssh/sshd_config"
+        if os.path.exists(sshd_path):
+            try:
+                with open(sshd_path, "r") as f:
+                    lines = f.readlines()
+                new_lines = []
+                port_found = False
+                for line in lines:
+                    if line.strip().startswith("Port ") and not line.strip().startswith("PortName"):
+                        new_lines.append(f"Port {new['ssh_port']}\n")
+                        port_found = True
+                    else:
+                        new_lines.append(line)
+                if not port_found:
+                    new_lines.append(f"\nPort {new['ssh_port']}\n")
+                with open(sshd_path, "w") as f:
+                    f.writelines(new_lines)
+                changed = True
+            except Exception as e:
+                print(f"Error updating sshd_config: {e}")
+
+    # 2. Update Dropbear Ports if changed
+    dropbear_ports_changed = old.get("dropbear_ports") != new.get("dropbear_ports")
+    if dropbear_ports_changed:
+        ports = [p.strip() for p in str(new["dropbear_ports"]).split(",") if p.strip().isdigit()]
+        port_args = " ".join([f"-p {p}" for p in ports])
+        
+        dropbear_svc = "/etc/systemd/system/dropbear.service"
+        if os.path.exists(dropbear_svc):
+            try:
+                with open(dropbear_svc, "r") as f:
+                    lines = f.readlines()
+                new_lines = []
+                for line in lines:
+                    if line.strip().startswith("ExecStart="):
+                        new_lines.append(f"ExecStart=/usr/sbin/dropbear -F {port_args} -W 65536 -b /etc/issue.net\n")
+                    else:
+                        new_lines.append(line)
+                with open(dropbear_svc, "w") as f:
+                    f.writelines(new_lines)
+                changed = True
+            except Exception as e:
+                print(f"Error updating dropbear.service: {e}")
+
+    # 3. Update Stunnel Ports if changed
+    stunnel_changed = (
+        old.get("ssl_port") != new.get("ssl_port") or 
+        old.get("ssl_ws_port") != new.get("ssl_ws_port") or
+        ssh_port_changed or
+        old.get("ws_port") != new.get("ws_port")
+    )
+    if stunnel_changed:
+        stunnel_conf = "/etc/stunnel/stunnel.conf"
+        if os.path.exists(stunnel_conf):
+            try:
+                cert_path = "/etc/stunnel/stunnel.pem"
+                content = f"""pid = /var/run/stunnel4/stunnel4.pid
+socket = a:SO_REUSEADDR=1
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+
+[dropbear-ssl]
+accept  = {new['ssl_port']}
+connect = 127.0.0.1:{new['ssh_port']}
+cert    = {cert_path}
+
+[ws-ssl]
+accept  = {new['ssl_ws_port']}
+connect = 127.0.0.1:{new['ws_port']}
+cert    = {cert_path}
+"""
+                with open(stunnel_conf, "w") as f:
+                    f.write(content)
+                changed = True
+            except Exception as e:
+                print(f"Error updating stunnel.conf: {e}")
+
+    # 4. Update WS-SSH Port if changed
+    ws_changed = old.get("ws_port") != new.get("ws_port") or ssh_port_changed
+    if ws_changed:
+        ws_svc = "/etc/systemd/system/ws-ssh.service"
+        if os.path.exists(ws_svc):
+            try:
+                with open(ws_svc, "r") as f:
+                    lines = f.readlines()
+                new_lines = []
+                for line in lines:
+                    if line.strip().startswith("ExecStart="):
+                        new_lines.append(f"ExecStart=/usr/local/bin/ws-ssh {new['ws_port']} 127.0.0.1:{new['ssh_port']}\n")
+                    else:
+                        new_lines.append(line)
+                with open(ws_svc, "w") as f:
+                    f.writelines(new_lines)
+                changed = True
+            except Exception as e:
+                print(f"Error updating ws-ssh.service: {e}")
+
+    # 5. Update BadVPN UDP GW Port if changed
+    udp_changed = old.get("udp_port") != new.get("udp_port")
+    if udp_changed:
+        old_port = old.get("udp_port", 7300)
+        new_port = new.get("udp_port", 7300)
+        
+        subprocess.call(f"systemctl stop badvpn-{old_port} 2>/dev/null", shell=True)
+        subprocess.call(f"systemctl disable badvpn-{old_port} 2>/dev/null", shell=True)
+        old_svc_file = f"/etc/systemd/system/badvpn-{old_port}.service"
+        if os.path.exists(old_svc_file):
+            try:
+                os.remove(old_svc_file)
+            except Exception:
+                pass
+                
+        new_svc_file = f"/etc/systemd/system/badvpn-{new_port}.service"
+        svc_content = f"""[Unit]
+Description=BadVPN UDP Gateway :{new_port}
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:{new_port} --max-clients 500 --max-connections-for-client 10
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+"""
+        try:
+            with open(new_svc_file, "w") as f:
+                f.write(svc_content)
+            subprocess.call("systemctl daemon-reload", shell=True)
+            subprocess.call(f"systemctl enable badvpn-{new_port}", shell=True)
+            subprocess.call(f"systemctl start badvpn-{new_port}", shell=True)
+            changed = True
+        except Exception as e:
+            print(f"Error updating badvpn service: {e}")
+
+    # Restart affected services
+    if changed:
+        try:
+            subprocess.call("systemctl daemon-reload", shell=True)
+            if ssh_port_changed:
+                subprocess.call("systemctl restart ssh sshd", shell=True)
+            if dropbear_ports_changed:
+                subprocess.call("systemctl restart dropbear", shell=True)
+            if stunnel_changed:
+                subprocess.call("systemctl restart stunnel4", shell=True)
+            if ws_changed:
+                subprocess.call("systemctl restart ws-ssh", shell=True)
+        except Exception as e:
+            print(f"Error restarting services: {e}")
 
 def get_users_bandwidth(usernames):
     db = load_bandwidth()
@@ -480,28 +637,33 @@ def api_update_config():
     data = request.json
     
     config = load_config()
-    old_port = config.get("port", 40460)
+    old_config = config.copy()
     
     config["username"] = data.get("username", config.get("username", "admin"))
     config["password"] = data.get("password", config.get("password", "admin123"))
-    config["port"] = int(data.get("port", old_port))
+    config["port"] = int(data.get("port", config.get("port", 40460)))
     config["host"] = data.get("host", config.get("host", "free-vps.foridul.store"))
     config["ssh_port"] = int(data.get("ssh_port", config.get("ssh_port", 22)))
+    config["dropbear_ports"] = data.get("dropbear_ports", config.get("dropbear_ports", "144, 109, 50000"))
     config["ssl_port"] = int(data.get("ssl_port", config.get("ssl_port", 443)))
+    config["ssl_ws_port"] = int(data.get("ssl_ws_port", config.get("ssl_ws_port", 2083)))
     config["ws_port"] = int(data.get("ws_port", config.get("ws_port", 143)))
     config["udp_port"] = int(data.get("udp_port", config.get("udp_port", 7300)))
     
     try:
+        # Programmatically apply the new ports to system services!
+        apply_system_ports(old_config, config)
+        
         with open(CONFIG_FILE, "w") as f:
             json.dump(config, f, indent=4)
             
-        if config["port"] != old_port:
+        if config["port"] != old_config["port"]:
             def restart_service():
                 time.sleep(1)
                 subprocess.call("systemctl restart ssh-panel", shell=True)
             threading.Thread(target=restart_service).start()
             
-        return jsonify({"success": "Server configuration updated successfully!", "port_changed": config["port"] != old_port})
+        return jsonify({"success": "Server configuration and system ports updated successfully!", "port_changed": config["port"] != old_config["port"]})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -539,7 +701,6 @@ def api_create_user():
             exp_date = subprocess.check_output(f"date -d '+{expiry_days} days' +%Y-%m-%d", shell=True).decode().strip()
             subprocess.check_call(f"chage -E {exp_date} {username}", shell=True)
         
-        # Save limits
         limits = load_user_limits()
         limits[username] = {
             "bandwidth_limit": int(bw_limit_gb * 1024 * 1024 * 1024),
@@ -570,10 +731,6 @@ def api_edit_limits():
             "connection_limit": conn_limit
         }
         save_user_limits(limits)
-        
-        # If user was locked due to bandwidth and limit was updated, and they are now under the limit,
-        # we can automatically check and unlock them if desired. But for simplicity, let the admin do it or let them unlock manually.
-        
         return jsonify({"success": f"Limits updated for '{username}'."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
