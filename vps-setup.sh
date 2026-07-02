@@ -130,6 +130,8 @@ import os
 import sys
 import json
 import subprocess
+import threading
+import time
 from datetime import datetime
 from flask import Flask, jsonify, request, render_template, session, redirect, url_for
 
@@ -138,19 +140,38 @@ app.secret_key = "ssh-panel-secret-key-super-secure"
 
 CONFIG_FILE = "/etc/ssh-panel/config.json"
 BANDWIDTH_FILE = "/etc/ssh-panel/bandwidth.json"
+LIMITS_FILE = "/etc/ssh-panel/user_limits.json"
 
 def load_config():
+    default_conf = {
+        "username": "admin", 
+        "password": "admin123", 
+        "port": 40460,
+        "host": "free-vps.foridul.store",
+        "ssh_port": 22,
+        "ssl_port": 443,
+        "ws_port": 143,
+        "udp_port": 7300
+    }
     if not os.path.exists(CONFIG_FILE):
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-        default_conf = {"username": "admin", "password": "admin123", "port": 40460}
         with open(CONFIG_FILE, "w") as f:
             json.dump(default_conf, f, indent=4)
         return default_conf
     try:
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
+            conf = json.load(f)
+            updated = False
+            for k, v in default_conf.items():
+                if k not in conf:
+                    conf[k] = v
+                    updated = True
+            if updated:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(conf, f, indent=4)
+            return conf
     except Exception:
-        return {"username": "admin", "password": "admin123", "port": 40460}
+        return default_conf
 
 def load_bandwidth():
     if not os.path.exists(BANDWIDTH_FILE):
@@ -168,6 +189,23 @@ def save_bandwidth(data):
             json.dump(data, f, indent=4)
     except Exception as e:
         print(f"Error saving bandwidth: {e}")
+
+def load_user_limits():
+    if not os.path.exists(LIMITS_FILE):
+        return {}
+    try:
+        with open(LIMITS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_user_limits(data):
+    try:
+        os.makedirs(os.path.dirname(LIMITS_FILE), exist_ok=True)
+        with open(LIMITS_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving user limits: {e}")
 
 def get_users_bandwidth(usernames):
     db = load_bandwidth()
@@ -381,8 +419,21 @@ def get_users_list():
                     })
         
         bandwidths = get_users_bandwidth(usernames)
+        limits = load_user_limits()
         for u in raw_users:
-            u["bandwidth"] = bandwidths.get(u["username"], "0 B")
+            uname = u["username"]
+            u["bandwidth"] = bandwidths.get(uname, "0 B")
+            
+            user_lim = limits.get(uname, {"bandwidth_limit": 0, "connection_limit": 0})
+            bw_lim_bytes = user_lim.get("bandwidth_limit", 0)
+            if bw_lim_bytes == 0:
+                u["bandwidth_limit_str"] = "Unlimited"
+            else:
+                u["bandwidth_limit_str"] = f"{bw_lim_bytes / (1024*1024*1024):.1f} GB"
+                
+            u["bandwidth_limit"] = bw_lim_bytes
+            u["connection_limit"] = user_lim.get("connection_limit", 0)
+            
             users.append(u)
             
     except Exception as e:
@@ -415,6 +466,45 @@ def api_stats():
         return jsonify({"error": "Unauthorized"}), 401
     return jsonify(get_system_stats())
 
+@app.route("/api/config", methods=["GET"])
+def api_get_config():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    config = load_config()
+    return jsonify(config)
+
+@app.route("/api/config/update", methods=["POST"])
+def api_update_config():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.json
+    
+    config = load_config()
+    old_port = config.get("port", 40460)
+    
+    config["username"] = data.get("username", config.get("username", "admin"))
+    config["password"] = data.get("password", config.get("password", "admin123"))
+    config["port"] = int(data.get("port", old_port))
+    config["host"] = data.get("host", config.get("host", "free-vps.foridul.store"))
+    config["ssh_port"] = int(data.get("ssh_port", config.get("ssh_port", 22)))
+    config["ssl_port"] = int(data.get("ssl_port", config.get("ssl_port", 443)))
+    config["ws_port"] = int(data.get("ws_port", config.get("ws_port", 143)))
+    config["udp_port"] = int(data.get("udp_port", config.get("udp_port", 7300)))
+    
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config, f, indent=4)
+            
+        if config["port"] != old_port:
+            def restart_service():
+                time.sleep(1)
+                subprocess.call("systemctl restart ssh-panel", shell=True)
+            threading.Thread(target=restart_service).start()
+            
+        return jsonify({"success": "Server configuration updated successfully!", "port_changed": config["port"] != old_port})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/users", methods=["GET"])
 def api_users():
     if not session.get("logged_in"):
@@ -429,6 +519,8 @@ def api_create_user():
     username = data.get("username")
     password = data.get("password")
     expiry_days = data.get("expiry")
+    conn_limit = int(data.get("connection_limit", 0))
+    bw_limit_gb = float(data.get("bandwidth_limit", 0))
 
     if not username or not password:
         return jsonify({"error": "Username and password required"}), 400
@@ -447,7 +539,42 @@ def api_create_user():
             exp_date = subprocess.check_output(f"date -d '+{expiry_days} days' +%Y-%m-%d", shell=True).decode().strip()
             subprocess.check_call(f"chage -E {exp_date} {username}", shell=True)
         
+        # Save limits
+        limits = load_user_limits()
+        limits[username] = {
+            "bandwidth_limit": int(bw_limit_gb * 1024 * 1024 * 1024),
+            "connection_limit": conn_limit
+        }
+        save_user_limits(limits)
+
         return jsonify({"success": f"User '{username}' created successfully!"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/users/edit-limits", methods=["POST"])
+def api_edit_limits():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.json
+    username = data.get("username")
+    conn_limit = int(data.get("connection_limit", 0))
+    bw_limit_gb = float(data.get("bandwidth_limit", 0))
+
+    if not username:
+        return jsonify({"error": "Username required"}), 400
+
+    try:
+        limits = load_user_limits()
+        limits[username] = {
+            "bandwidth_limit": int(bw_limit_gb * 1024 * 1024 * 1024),
+            "connection_limit": conn_limit
+        }
+        save_user_limits(limits)
+        
+        # If user was locked due to bandwidth and limit was updated, and they are now under the limit,
+        # we can automatically check and unlock them if desired. But for simplicity, let the admin do it or let them unlock manually.
+        
+        return jsonify({"success": f"Limits updated for '{username}'."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -471,18 +598,21 @@ def api_delete_user():
         subprocess.call(f"pkill -u {username} 2>/dev/null", shell=True)
         subprocess.check_call(f"userdel -r {username}", shell=True)
         
-        # Clean up iptables and ip6tables rules
         if uid:
             for tool in ["iptables", "ip6tables"]:
                 subprocess.call(f"{tool} -t mangle -D OUTPUT -m owner --uid-owner {username} -j CONNMARK --set-mark {uid} 2>/dev/null", shell=True)
                 subprocess.call(f"{tool} -D INPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{username}' 2>/dev/null", shell=True)
                 subprocess.call(f"{tool} -D OUTPUT -m mark --mark {uid} -m comment --comment 'ssh-panel:{username}' 2>/dev/null", shell=True)
         
-        # Clean up bandwidth JSON database
         db = load_bandwidth()
         if username in db:
             del db[username]
             save_bandwidth(db)
+            
+        limits = load_user_limits()
+        if username in limits:
+            del limits[username]
+            save_user_limits(limits)
             
         return jsonify({"success": f"User '{username}' deleted."})
     except Exception as e:
@@ -549,8 +679,67 @@ def api_set_expiry():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Background Limits Enforcer Thread
+def limits_enforcer_thread():
+    while True:
+        try:
+            usernames = []
+            with open("/etc/passwd", "r") as f:
+                for line in f.readlines():
+                    parts = line.strip().split(":")
+                    if len(parts) >= 3:
+                        username = parts[0]
+                        uid = int(parts[2])
+                        if uid >= 1000 and username != "nobody":
+                            usernames.append(username)
+
+            limits = load_user_limits()
+            bw_db = load_bandwidth()
+
+            for user in usernames:
+                user_limit = limits.get(user, {"bandwidth_limit": 0, "connection_limit": 0})
+                
+                # Check Bandwidth Limit
+                bw_limit = user_limit.get("bandwidth_limit", 0)
+                if bw_limit > 0:
+                    accumulated = bw_db.get(user, {}).get("accumulated", 0)
+                    if accumulated >= bw_limit:
+                        try:
+                            pwd_out = subprocess.check_output(f"passwd -S {user}", shell=True).decode()
+                            if pwd_out.split()[1] != "L":
+                                subprocess.call(f"pkill -u {user} 2>/dev/null", shell=True)
+                                subprocess.check_call(f"passwd -l {user}", shell=True)
+                                print(f"User {user} locked due to bandwidth limit exceeded.")
+                        except Exception as e:
+                            print(f"Error locking user {user}: {e}")
+                        continue
+
+                # Check Connection Limit
+                conn_limit = user_limit.get("connection_limit", 0)
+                if conn_limit > 0:
+                    try:
+                        ps_out = subprocess.check_output(f"pgrep -u {user} -f 'sshd:|dropbear'", shell=True).decode().strip()
+                        pids = [int(p) for p in ps_out.split() if p.isdigit()]
+                        if len(pids) > conn_limit:
+                            pids.sort()
+                            excess_count = len(pids) - conn_limit
+                            pids_to_kill = pids[-excess_count:]
+                            for pid in pids_to_kill:
+                                subprocess.call(f"kill -9 {pid} 2>/dev/null", shell=True)
+                                print(f"Killed excess connection PID {pid} for user {user} (Limit: {conn_limit}).")
+                    except subprocess.CalledProcessError:
+                        pass
+        except Exception as e:
+            print(f"Error in limits enforcer thread: {e}")
+        time.sleep(10)
+
 if __name__ == "__main__":
     conf = load_config()
+    
+    # Start background limits enforcer daemon
+    t = threading.Thread(target=limits_enforcer_thread, daemon=True)
+    t.start()
+    
     app.run(host="0.0.0.0", port=conf["port"])
 
 EOF
@@ -1003,6 +1192,8 @@ EOF
             padding: 30px;
             width: 100%;
             max-width: 450px;
+            max-height: 90vh;
+            overflow-y: auto;
             box-shadow: 0 25px 50px rgba(0,0,0,0.5);
             transform: scale(0.9);
             transition: all 0.3s ease;
@@ -1101,6 +1292,7 @@ EOF
         <div class="header-actions">
             <button class="btn btn-secondary" onclick="fetchUsers()"><i class="fa-solid fa-rotate"></i> Refresh</button>
             <button class="btn" onclick="openModal('addUserModal')"><i class="fa-solid fa-plus"></i> Add User</button>
+            <button class="btn btn-secondary" onclick="openConfigModal()"><i class="fa-solid fa-gears"></i> Settings</button>
             <a href="/logout" class="btn btn-secondary" style="text-decoration:none;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
         </div>
     </div>
@@ -1198,7 +1390,82 @@ EOF
                     <label>Expiry (Days, 0 = Permanent)</label>
                     <input type="number" id="add-expiry" class="form-control" value="0" min="0" required>
                 </div>
+                <div class="form-group">
+                    <label>Connection Limit (0 = Unlimited)</label>
+                    <input type="number" id="add-conn-limit" class="form-control" value="0" min="0" required>
+                </div>
+                <div class="form-group">
+                    <label>Bandwidth Limit (GB, 0 = Unlimited)</label>
+                    <input type="number" id="add-bw-limit" class="form-control" value="0" min="0" step="0.1" required>
+                </div>
                 <button type="submit" class="btn" style="width: 100%; justify-content: center; margin-top: 10px;">Create Account</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Edit Limits Modal -->
+    <div class="modal" id="editLimitsModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Edit User Limits</h3>
+                <button class="btn-close" onclick="closeModal('editLimitsModal')">&times;</button>
+            </div>
+            <form id="editLimitsForm" onsubmit="saveLimits(event)">
+                <input type="hidden" id="edit-limits-username">
+                <div class="form-group">
+                    <label>Connection Limit (0 = Unlimited)</label>
+                    <input type="number" id="edit-conn-limit" class="form-control" min="0" required>
+                </div>
+                <div class="form-group">
+                    <label>Bandwidth Limit (GB, 0 = Unlimited)</label>
+                    <input type="number" id="edit-bw-limit" class="form-control" min="0" step="0.1" required>
+                </div>
+                <button type="submit" class="btn" style="width: 100%; justify-content: center; margin-top: 10px;">Save Limits</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Server Config Modal -->
+    <div class="modal" id="configModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Server Configuration</h3>
+                <button class="btn-close" onclick="closeModal('configModal')">&times;</button>
+            </div>
+            <form id="configForm" onsubmit="saveConfig(event)">
+                <div class="form-group">
+                    <label>Panel Username</label>
+                    <input type="text" id="cfg-username" class="form-control" required autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>Panel Password</label>
+                    <input type="password" id="cfg-password" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>Panel Web Port</label>
+                    <input type="number" id="cfg-port" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>Server Host / Domain</label>
+                    <input type="text" id="cfg-host" class="form-control" required autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label>SSH Port</label>
+                    <input type="number" id="cfg-ssh" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>SSL Port (Stunnel)</label>
+                    <input type="number" id="cfg-ssl" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>WebSocket Port</label>
+                    <input type="number" id="cfg-ws" class="form-control" required>
+                </div>
+                <div class="form-group">
+                    <label>UDP GW Port (BadVPN)</label>
+                    <input type="number" id="cfg-udp" class="form-control" required>
+                </div>
+                <button type="submit" class="btn" style="width: 100%; justify-content: center; margin-top: 10px;">Save Settings</button>
             </form>
         </div>
     </div>
@@ -1257,12 +1524,72 @@ EOF
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <script>
+        let serverConfig = {};
+
         function openModal(id) {
             document.getElementById(id).classList.add('active');
         }
 
         function closeModal(id) {
             document.getElementById(id).classList.remove('active');
+        }
+
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/config');
+                serverConfig = await res.json();
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        function openConfigModal() {
+            document.getElementById('cfg-username').value = serverConfig.username || 'admin';
+            document.getElementById('cfg-password').value = serverConfig.password || '';
+            document.getElementById('cfg-port').value = serverConfig.port || 40460;
+            document.getElementById('cfg-host').value = serverConfig.host || '';
+            document.getElementById('cfg-ssh').value = serverConfig.ssh_port || 22;
+            document.getElementById('cfg-ssl').value = serverConfig.ssl_port || 443;
+            document.getElementById('cfg-ws').value = serverConfig.ws_port || 143;
+            document.getElementById('cfg-udp').value = serverConfig.udp_port || 7300;
+            openModal('configModal');
+        }
+
+        async function saveConfig(e) {
+            e.preventDefault();
+            const payload = {
+                username: document.getElementById('cfg-username').value,
+                password: document.getElementById('cfg-password').value,
+                port: parseInt(document.getElementById('cfg-port').value),
+                host: document.getElementById('cfg-host').value,
+                ssh_port: parseInt(document.getElementById('cfg-ssh').value),
+                ssl_port: parseInt(document.getElementById('cfg-ssl').value),
+                ws_port: parseInt(document.getElementById('cfg-ws').value),
+                udp_port: parseInt(document.getElementById('cfg-udp').value)
+            };
+
+            try {
+                const res = await fetch('/api/config/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (data.error) {
+                    alert(data.error);
+                } else {
+                    closeModal('configModal');
+                    if (data.port_changed) {
+                        alert('Settings saved. Web port changed, restarting web panel. Please log back in on the new port in a few seconds.');
+                        window.location.port = payload.port;
+                    } else {
+                        alert('Settings saved successfully!');
+                        fetchConfig();
+                    }
+                }
+            } catch (err) {
+                alert('Connection error');
+            }
         }
 
         async function fetchStats() {
@@ -1302,17 +1629,21 @@ EOF
                         ? `<span class="badge badge-danger">Locked</span>`
                         : `<span class="badge badge-success">Active</span>`;
 
-                    const bwBadge = `<span class="badge" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color); font-weight:600;">${user.bandwidth || '0 B'}</span>`;
+                    const maxBw = user.bandwidth_limit_str || 'Unlimited';
+                    const maxConn = user.connection_limit > 0 ? user.connection_limit : '∞';
+                    const bwBadge = `<span class="badge" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color); font-weight:600;">${user.bandwidth || '0 B'} / ${maxBw}</span>`;
+
                     tr.innerHTML = `
                         <td style="font-weight:600;">${user.username}</td>
                         <td>${bwBadge}</td>
                         <td>${expiryBadge}</td>
                         <td>${statusBadge}</td>
-                        <td><span style="font-weight:600; color:var(--secondary-color);">${user.sessions}</span> active</td>
+                        <td><span style="font-weight:600; color:var(--secondary-color);">${user.sessions}</span> / ${maxConn} active</td>
                         <td class="actions">
                             <button class="btn-action" title="Share User" onclick="shareUser('${user.username}')"><i class="fa-solid fa-share-nodes"></i></button>
                             <button class="btn-action" title="Change Password" onclick="openChpassModal('${user.username}')"><i class="fa-solid fa-key"></i></button>
                             <button class="btn-action" title="Set Expiry" onclick="openExpiryModal('${user.username}')"><i class="fa-solid fa-calendar-days"></i></button>
+                            <button class="btn-action" title="Edit Limits" onclick="openLimitsModal('${user.username}', ${user.connection_limit}, ${user.bandwidth_limit / 1073741824})"><i class="fa-solid fa-sliders"></i></button>
                             <button class="btn-action" title="Lock/Unlock" onclick="toggleLock('${user.username}')"><i class="fa-solid ${user.status === 'Locked' ? 'fa-lock' : 'fa-unlock'}"></i></button>
                             <button class="btn-action btn-delete" title="Delete User" onclick="deleteUser('${user.username}')"><i class="fa-solid fa-trash"></i></button>
                         </td>
@@ -1329,12 +1660,14 @@ EOF
             const username = document.getElementById('add-username').value;
             const password = document.getElementById('add-password').value;
             const expiry = document.getElementById('add-expiry').value;
+            const connection_limit = document.getElementById('add-conn-limit').value;
+            const bandwidth_limit = document.getElementById('add-bw-limit').value;
 
             try {
                 const res = await fetch('/api/users/create', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, expiry })
+                    body: JSON.stringify({ username, password, expiry, connection_limit, bandwidth_limit })
                 });
                 const data = await res.json();
                 if (data.error) {
@@ -1342,6 +1675,36 @@ EOF
                 } else {
                     closeModal('addUserModal');
                     document.getElementById('addUserForm').reset();
+                    fetchUsers();
+                }
+            } catch (err) {
+                alert('Connection error');
+            }
+        }
+
+        function openLimitsModal(username, connLimit, bwLimitGb) {
+            document.getElementById('edit-limits-username').value = username;
+            document.getElementById('edit-conn-limit').value = connLimit;
+            document.getElementById('edit-bw-limit').value = bwLimitGb;
+            openModal('editLimitsModal');
+        }
+
+        async function saveLimits(e) {
+            e.preventDefault();
+            const username = document.getElementById('edit-limits-username').value;
+            const connection_limit = document.getElementById('edit-conn-limit').value;
+            const bandwidth_limit = document.getElementById('edit-bw-limit').value;
+
+            try {
+                const res = await fetch('/api/users/edit-limits', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, connection_limit, bandwidth_limit })
+                });
+                const data = await res.json();
+                if (data.error) alert(data.error);
+                else {
+                    closeModal('editLimitsModal');
                     fetchUsers();
                 }
             } catch (err) {
@@ -1436,20 +1799,20 @@ EOF
         }
 
         function shareUser(username) {
-            const host = window.location.hostname;
-            const port = 144; 
-            const wsPort = 143;
-            const sslPort = 443;
-            const sslWsPort = 2083;
+            const host = serverConfig.host || window.location.hostname;
+            const port = serverConfig.ssh_port || 22; 
+            const wsPort = serverConfig.ws_port || 143;
+            const sslPort = serverConfig.ssl_port || 443;
+            const udpPort = serverConfig.udp_port || 7300;
             
-            const configText = `Host: ${host}\nDropbear Port: ${port}\nWS Port: ${wsPort}\nSSL Port (Dropbear): ${sslPort}\nSSL Port (WS): ${sslWsPort}\nUsername: ${username}`;
+            const configText = `Host: ${host}\nSSH Port: ${port}\nWS Port: ${wsPort}\nSSL Port: ${sslPort}\nUDP GW Port: ${udpPort}\nUsername: ${username}`;
             
             document.getElementById('share-text').innerText = configText;
             
             const qrDiv = document.getElementById('qr-code');
             qrDiv.innerHTML = '';
             new QRCode(qrDiv, {
-                text: `Host:${host}|Port:${port}|User:${username}`,
+                text: `Host:${host}|Port:${sslPort}|User:${username}`,
                 width: 160,
                 height: 160,
                 colorDark : "#000000",
@@ -1460,9 +1823,12 @@ EOF
             openModal('shareUserModal');
         }
 
-        fetchStats();
-        fetchUsers();
-        setInterval(fetchStats, 5000);
+        // Init
+        fetchConfig().then(() => {
+            fetchStats();
+            fetchUsers();
+        });
+        setInterval(fetchStats, 10000);
     </script>
 </body>
 </html>
