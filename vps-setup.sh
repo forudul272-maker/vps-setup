@@ -250,7 +250,7 @@ def load_config():
         return {"username": "admin", "password": "admin123", "port": 40460}
 
 def get_system_stats():
-    stats = {"cpu": 0, "ram": 0, "disk": 0, "uptime": "N/A"}
+    stats = {"cpu": 0, "ram": 0, "disk": 0, "uptime": "N/A", "network": "0 B", "total_ssh_bandwidth": "0 B"}
     try:
         # CPU Usage
         cpu_cmd = "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'"
@@ -267,6 +267,44 @@ def get_system_stats():
         
         # Uptime
         stats["uptime"] = subprocess.check_output("uptime -p", shell=True).decode().strip().replace("up ", "")
+
+        # VPS Total network traffic (excluding loopback)
+        total_net = 0
+        try:
+            with open("/proc/net/dev", "r") as f:
+                lines = f.readlines()
+            for line in lines[2:]:
+                parts = line.split()
+                if len(parts) >= 10:
+                    iface = parts[0].strip(":")
+                    if iface != "lo":
+                        total_net += int(parts[1]) + int(parts[9])
+        except Exception:
+            pass
+            
+        if total_net >= 1024 * 1024 * 1024:
+            stats["network"] = f"{total_net / (1024*1024*1024):.2f} GB"
+        elif total_net >= 1024 * 1024:
+            stats["network"] = f"{total_net / (1024*1024):.1f} MB"
+        else:
+            stats["network"] = f"{total_net / 1024:.1f} KB"
+
+        # SSH Total bandwidth (sum of all users in json)
+        total_ssh = 0
+        try:
+            db = load_bandwidth()
+            for user, data in db.items():
+                total_ssh += data.get("accumulated", 0)
+        except Exception:
+            pass
+            
+        if total_ssh >= 1024 * 1024 * 1024:
+            stats["total_ssh_bandwidth"] = f"{total_ssh / (1024*1024*1024):.2f} GB"
+        elif total_ssh >= 1024 * 1024:
+            stats["total_ssh_bandwidth"] = f"{total_ssh / (1024*1024):.1f} MB"
+        else:
+            stats["total_ssh_bandwidth"] = f"{total_ssh / 1024:.1f} KB"
+
     except Exception:
         pass
     return stats
@@ -1065,6 +1103,34 @@ EOF
                 <p id="uptime-stat">N/A</p>
             </div>
         </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background: rgba(124, 77, 255, 0.1); color: var(--primary-color);"><i class="fa-solid fa-chart-line"></i></div>
+            <div class="stat-info">
+                <h3>Total SSH Traffic</h3>
+                <p id="ssh-bandwidth-stat">0 B</p>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color);"><i class="fa-solid fa-globe"></i></div>
+            <div class="stat-info">
+                <h3>Total VPS Traffic</h3>
+                <p id="vps-bandwidth-stat">0 B</p>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background: rgba(124, 77, 255, 0.1); color: var(--primary-color);"><i class="fa-solid fa-chart-line"></i></div>
+            <div class="stat-info">
+                <h3>Total SSH Traffic</h3>
+                <p id="ssh-bandwidth-stat">0 B</p>
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-icon" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color);"><i class="fa-solid fa-globe"></i></div>
+            <div class="stat-info">
+                <h3>Total VPS Traffic</h3>
+                <p id="vps-bandwidth-stat">0 B</p>
+            </div>
+        </div>
     </div>
 
     <div class="content-card">
@@ -1183,6 +1249,10 @@ EOF
                 document.getElementById('ram-stat').textContent = stats.ram + '%';
                 document.getElementById('disk-stat').textContent = stats.disk + '%';
                 document.getElementById('uptime-stat').textContent = stats.uptime;
+                document.getElementById('ssh-bandwidth-stat').textContent = stats.total_ssh_bandwidth || '0 B';
+                document.getElementById('vps-bandwidth-stat').textContent = stats.network || '0 B';
+                document.getElementById('ssh-bandwidth-stat').textContent = stats.total_ssh_bandwidth || '0 B';
+                document.getElementById('vps-bandwidth-stat').textContent = stats.network || '0 B';
             } catch (err) {
                 console.error(err);
             }
