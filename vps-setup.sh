@@ -261,7 +261,7 @@ def get_users_bandwidth(usernames):
     return formatted
 
 def get_system_stats():
-    stats = {"cpu": 0, "ram": 0, "disk": 0, "uptime": "N/A", "network": "0 B", "total_ssh_bandwidth": "0 B"}
+    stats = {"cpu": 0, "ram": 0, "disk": 0, "uptime": "N/A", "network": "0 B", "total_ssh_bandwidth": "0 B", "online_users": "0 Active"}
     try:
         # CPU Usage
         cpu_cmd = "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - $1}'"
@@ -316,6 +316,15 @@ def get_system_stats():
         else:
             stats["total_ssh_bandwidth"] = f"{total_ssh / 1024:.1f} KB"
 
+        # Count total active unique users
+        active_users_count = 0
+        try:
+            users_list = get_users_list()
+            active_users_count = sum(1 for u in users_list if u["sessions"] > 0)
+        except Exception:
+            pass
+        stats["online_users"] = f"{active_users_count} Active"
+
     except Exception:
         pass
     return stats
@@ -355,9 +364,11 @@ def get_users_list():
                     
                     sessions = 0
                     try:
-                        who_out = subprocess.check_output("who", shell=True).decode()
-                        for wl in who_out.splitlines():
-                            if wl.startswith(username):
+                        ps_cmd = f"ps -u {username} -o comm= 2>/dev/null"
+                        ps_out = subprocess.check_output(ps_cmd, shell=True).decode()
+                        for comm in ps_out.splitlines():
+                            comm_name = comm.strip().lower()
+                            if "sshd" in comm_name or "dropbear" in comm_name:
                                 sessions += 1
                     except Exception:
                         pass
@@ -1124,17 +1135,10 @@ EOF
             </div>
         </div>
         <div class="stat-card">
-            <div class="stat-icon" style="background: rgba(124, 77, 255, 0.1); color: var(--primary-color);"><i class="fa-solid fa-chart-line"></i></div>
+            <div class="stat-icon" style="background: rgba(0, 230, 118, 0.1); color: var(--success-color);"><i class="fa-solid fa-users"></i></div>
             <div class="stat-info">
-                <h3>Total SSH Traffic</h3>
-                <p id="ssh-bandwidth-stat">0 B</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color);"><i class="fa-solid fa-globe"></i></div>
-            <div class="stat-info">
-                <h3>Total VPS Traffic</h3>
-                <p id="vps-bandwidth-stat">0 B</p>
+                <h3>Online Users</h3>
+                <p id="online-users-stat">0 Active</p>
             </div>
         </div>
         <div class="stat-card">
@@ -1269,8 +1273,7 @@ EOF
                 document.getElementById('ram-stat').textContent = stats.ram + '%';
                 document.getElementById('disk-stat').textContent = stats.disk + '%';
                 document.getElementById('uptime-stat').textContent = stats.uptime;
-                document.getElementById('ssh-bandwidth-stat').textContent = stats.total_ssh_bandwidth || '0 B';
-                document.getElementById('vps-bandwidth-stat').textContent = stats.network || '0 B';
+                document.getElementById('online-users-stat').textContent = stats.online_users || '0 Active';
                 document.getElementById('ssh-bandwidth-stat').textContent = stats.total_ssh_bandwidth || '0 B';
                 document.getElementById('vps-bandwidth-stat').textContent = stats.network || '0 B';
             } catch (err) {
@@ -1463,6 +1466,7 @@ EOF
     </script>
 </body>
 </html>
+
 EOF
 
     # 4. Create default config.json if not exists
