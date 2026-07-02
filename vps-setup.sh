@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # ============================================================
 #   VPS SETUP SCRIPT - CLEAN & LIGHT (SSH + 3X-UI + Web Panel)
 #   Supports: Ubuntu 20.04 / 22.04 / 24.04
@@ -136,6 +136,104 @@ from flask import Flask, jsonify, request, render_template, session, redirect, u
 app = Flask(__name__)
 app.secret_key = "ssh-panel-secret-key-super-secure"
 
+BANDWIDTH_FILE = "/etc/ssh-panel/bandwidth.json"
+
+def load_bandwidth():
+    if not os.path.exists(BANDWIDTH_FILE):
+        return {}
+    try:
+        with open(BANDWIDTH_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_bandwidth(data):
+    try:
+        os.makedirs(os.path.dirname(BANDWIDTH_FILE), exist_ok=True)
+        with open(BANDWIDTH_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving bandwidth: {e}")
+
+def get_users_bandwidth(usernames):
+    current_iptables = {}
+    
+    def parse_tool(tool_name):
+        try:
+            out = subprocess.check_output(f"{tool_name} -nvx -L OUTPUT", shell=True).decode()
+            for line in out.split("\\n"):
+                if "owner UID match" in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        bytes_count = int(parts[1])
+                        uid_str = parts[-1]
+                        current_iptables[uid_str] = current_iptables.get(uid_str, 0) + bytes_count
+        except Exception as e:
+            pass
+
+    parse_tool("iptables")
+    parse_tool("ip6tables")
+
+    db = load_bandwidth()
+    updated = False
+
+    for user in usernames:
+        uid = ""
+        try:
+            uid = subprocess.check_output(f"id -u {user}", shell=True).decode().strip()
+        except Exception:
+            pass
+
+        iptables_val = current_iptables.get(user)
+        if iptables_val is None and uid:
+            iptables_val = current_iptables.get(uid)
+
+        if iptables_val is None:
+            try:
+                subprocess.call(f"iptables -I OUTPUT -m owner --uid-owner {user}", shell=True)
+                subprocess.call(f"ip6tables -I OUTPUT -m owner --uid-owner {user}", shell=True)
+            except Exception:
+                pass
+            iptables_val = 0
+
+        if user not in db:
+            db[user] = {"accumulated": 0, "last_val": 0}
+            updated = True
+
+        user_data = db[user]
+        last_val = user_data.get("last_val", 0)
+        accumulated = user_data.get("accumulated", 0)
+
+        if iptables_val >= last_val:
+            diff = iptables_val - last_val
+            if diff > 0:
+                accumulated += diff
+                user_data["accumulated"] = accumulated
+                updated = True
+        else:
+            accumulated += iptables_val
+            user_data["accumulated"] = accumulated
+            updated = True
+
+        user_data["last_val"] = iptables_val
+
+    if updated:
+        save_bandwidth(db)
+
+    formatted = {}
+    for user in usernames:
+        bytes_used = db.get(user, {}).get("accumulated", 0)
+        if bytes_used >= 1024 * 1024 * 1024:
+            formatted[user] = f"{bytes_used / (1024*1024*1024):.2f} GB"
+        elif bytes_used >= 1024 * 1024:
+            formatted[user] = f"{bytes_used / (1024*1024):.1f} MB"
+        elif bytes_used >= 1024:
+            formatted[user] = f"{bytes_used / 1024:.1f} KB"
+        else:
+            formatted[user] = f"{bytes_used} B"
+            
+    return formatted
+
 CONFIG_FILE = "/etc/ssh-panel/config.json"
 
 def load_config():
@@ -175,6 +273,8 @@ def get_system_stats():
 
 def get_users_list():
     users = []
+    usernames = []
+    raw_users = []
     try:
         with open("/etc/passwd", "r") as f:
             lines = f.readlines()
@@ -185,6 +285,7 @@ def get_users_list():
                 username = parts[0]
                 uid = int(parts[2])
                 if uid >= 1000 and username != "nobody":
+                    usernames.append(username)
                     expiry = "Never"
                     try:
                         chage_out = subprocess.check_output(f"chage -l {username}", shell=True).decode()
@@ -212,12 +313,19 @@ def get_users_list():
                     except Exception:
                         pass
                     
-                    users.append({
+                    raw_users.append({
                         "username": username,
                         "expiry": expiry,
                         "status": status,
                         "sessions": sessions
                     })
+        
+        # Add bandwidth info
+        bandwidths = get_users_bandwidth(usernames)
+        for u in raw_users:
+            u["bandwidth"] = bandwidths.get(u["username"], "0 B")
+            users.append(u)
+            
     except Exception as e:
         print(f"Error listing users: {e}")
     return users
@@ -297,6 +405,17 @@ def api_delete_user():
     try:
         subprocess.call(f"pkill -u {username} 2>/dev/null", shell=True)
         subprocess.check_call(f"userdel -r {username}", shell=True)
+        
+        # Clean up iptables and ip6tables rules
+        subprocess.call(f"iptables -D OUTPUT -m owner --uid-owner {username} 2>/dev/null", shell=True)
+        subprocess.call(f"ip6tables -D OUTPUT -m owner --uid-owner {username} 2>/dev/null", shell=True)
+        
+        # Clean up bandwidth JSON database
+        db = load_bandwidth()
+        if username in db:
+            del db[username]
+            save_bandwidth(db)
+            
         return jsonify({"success": f"User '{username}' deleted."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -956,6 +1075,7 @@ EOF
             <thead>
                 <tr>
                     <th>Username</th>
+                    <th>Bandwidth</th>
                     <th>Expiry</th>
                     <th>Status</th>
                     <th>Active Sessions</th>
@@ -1089,8 +1209,10 @@ EOF
                         ? `<span class="badge badge-danger">Locked</span>`
                         : `<span class="badge badge-success">Active</span>`;
 
+                    const bwBadge = `<span class="badge" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color); font-weight:600;">${user.bandwidth || '0 B'}</span>`;
                     tr.innerHTML = `
                         <td style="font-weight:600;">${user.username}</td>
+                        <td>${bwBadge}</td>
                         <td>${expiryBadge}</td>
                         <td>${statusBadge}</td>
                         <td><span style="font-weight:600; color:var(--secondary-color);">${user.sessions}</span> active</td>
