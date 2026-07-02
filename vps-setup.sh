@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # ============================================================
 #   VPS SETUP SCRIPT - CLEAN & LIGHT (SSH + 3X-UI + Web Panel)
 #   Supports: Ubuntu 20.04 / 22.04 / 24.04
@@ -12,7 +12,7 @@ WHITE='\033[1;37m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
 
 detect_os() {
     [ -f /etc/os-release ] && . /etc/os-release && OS_NAME=$ID && OS_VERSION=$VERSION_ID && OS_CODENAME=$VERSION_CODENAME || { echo -e "${RED}Cannot detect OS!${NC}"; exit 1; }
-    [[ "$OS_NAME" != "ubuntu" ]] && echo -e "${RED}Only Ubuntu supported!${NC}" && exit 1
+    [[ "$OS_NAME" != "ubuntu" && "$OS_NAME" != "debian" ]] && echo -e "${RED}Only Ubuntu and Debian supported!${NC}" && exit 1
 }
 
 get_system_info() {
