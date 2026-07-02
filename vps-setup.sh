@@ -651,7 +651,6 @@ def api_update_config():
     config["udp_port"] = int(data.get("udp_port", config.get("udp_port", 7300)))
     
     try:
-        # Programmatically apply the new ports to system services!
         apply_system_ports(old_config, config)
         
         with open(CONFIG_FILE, "w") as f:
@@ -835,6 +834,76 @@ def api_set_expiry():
             return jsonify({"success": f"Expiry set for '{username}' to {exp_date}."})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/services", methods=["GET"])
+def api_get_services():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    # We check if badvpn-7300 or another dynamic badvpn exists from configuration
+    config = load_config()
+    badvpn_port = config.get("udp_port", 7300)
+    
+    services = [
+        {"name": "OpenSSH Server", "service": "ssh"},
+        {"name": "Dropbear SSH", "service": "dropbear"},
+        {"name": "Stunnel TLS", "service": "stunnel4"},
+        {"name": "WebSocket SSH Bridge", "service": "ws-ssh"},
+        {"name": "BadVPN UDP Gateway", "service": f"badvpn-{badvpn_port}"},
+        {"name": "X-UI Panel", "service": "x-ui"}
+    ]
+    
+    status_list = []
+    for s in services:
+        state = "Inactive"
+        try:
+            out = subprocess.check_output(f"systemctl is-active {s['service']} 2>/dev/null", shell=True).decode().strip()
+            if out == "active":
+                state = "Active"
+        except Exception:
+            pass
+        status_list.append({
+            "name": s["name"],
+            "service": s["service"],
+            "status": state
+        })
+        
+    return jsonify(status_list)
+
+@app.route("/api/services/restart", methods=["POST"])
+def api_restart_service():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.json
+    srv_name = data.get("service")
+    if not srv_name:
+        return jsonify({"error": "Service name required"}), 400
+        
+    # Allow restart for any valid systemd service we manage
+    config = load_config()
+    badvpn_port = config.get("udp_port", 7300)
+    valid_services = ["ssh", "dropbear", "stunnel4", "ws-ssh", f"badvpn-{badvpn_port}", "x-ui"]
+    
+    if srv_name not in valid_services:
+        return jsonify({"error": "Invalid service name"}), 400
+        
+    try:
+        subprocess.check_call(f"systemctl restart {srv_name}", shell=True)
+        return jsonify({"success": f"Service '{srv_name}' restarted successfully!"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/system/reboot", methods=["POST"])
+def api_reboot():
+    if not session.get("logged_in"):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    def do_reboot():
+        time.sleep(2)
+        subprocess.call("reboot", shell=True)
+        
+    threading.Thread(target=do_reboot).start()
+    return jsonify({"success": "VPS reboot initiated successfully! The system will restart in a few seconds."})
 
 # Background Limits Enforcer Thread
 def limits_enforcer_thread():
@@ -1393,6 +1462,56 @@ EOF
             margin-top: 5px;
         }
 
+        /* Services grid styling */
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .service-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .service-info-block {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .service-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--text-color);
+        }
+
+        .service-action-btn {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--border-color);
+            width: 32px;
+            height: 32px;
+            border-radius: 6px;
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .service-action-btn:hover {
+            color: var(--secondary-color);
+            border-color: var(--secondary-color);
+            background: rgba(0, 229, 255, 0.05);
+        }
+
         /* Modal styling */
         .modal {
             position: fixed;
@@ -1598,6 +1717,7 @@ EOF
                 <button class="btn btn-secondary" onclick="fetchUsers()"><i class="fa-solid fa-rotate"></i> Refresh</button>
                 <button class="btn" onclick="openModal('addUserModal')"><i class="fa-solid fa-plus"></i> Add User</button>
                 <button class="btn btn-secondary" onclick="openConfigModal()"><i class="fa-solid fa-gears"></i> Settings</button>
+                <button class="btn" style="background: var(--danger-color); box-shadow: 0 4px 15px rgba(255, 23, 68, 0.3);" onclick="rebootVPS()"><i class="fa-solid fa-power-off"></i> Reboot</button>
                 <a href="/logout" class="btn btn-secondary" style="text-decoration:none;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
             </div>
         </div>
@@ -1651,6 +1771,16 @@ EOF
                     <h3>Total VPS Traffic</h3>
                     <p id="vps-bandwidth-stat">0 B</p>
                 </div>
+            </div>
+        </div>
+
+        <!-- System Services Status -->
+        <div class="content-card" style="margin-bottom: 30px;">
+            <div class="table-header">
+                <h2>System Services Status</h2>
+            </div>
+            <div class="services-grid" id="services-status-list">
+                <!-- Services status dynamic -->
             </div>
         </div>
 
@@ -1923,6 +2053,78 @@ EOF
             }
         }
 
+        async function fetchServices() {
+            try {
+                const res = await fetch('/api/services');
+                const services = await res.json();
+                const container = document.getElementById('services-status-list');
+                container.innerHTML = '';
+                
+                services.forEach(s => {
+                    const card = document.createElement('div');
+                    card.className = 'service-card';
+                    
+                    const badgeClass = s.status === 'Active' ? 'badge-success' : 'badge-danger';
+                    
+                    card.innerHTML = `
+                        <div class="service-info-block">
+                            <div class="service-name">${s.name}</div>
+                            <div>
+                                <span class="badge ${badgeClass}">${s.status}</span>
+                            </div>
+                        </div>
+                        <button class="service-action-btn" title="Restart Service" onclick="restartService('${s.service}', '${s.name}')">
+                            <i class="fa-solid fa-rotate"></i>
+                        </button>
+                    `;
+                    container.appendChild(card);
+                });
+            } catch (err) {
+                console.error(err);
+            }
+        }
+
+        async function restartService(service, name) {
+            if (!confirm(`Are you sure you want to restart ${name}?`)) return;
+            try {
+                const res = await fetch('/api/services/restart', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ service })
+                });
+                const data = await res.json();
+                if (data.error) alert(data.error);
+                else {
+                    alert(`${name} restarted successfully!`);
+                    fetchServices();
+                }
+            } catch (err) {
+                alert('Connection error');
+            }
+        }
+
+        async function rebootVPS() {
+            if (!confirm('WARNING: Are you sure you want to reboot the VPS? This will disconnect all users and make the panel temporarily unavailable.')) return;
+            try {
+                const res = await fetch('/api/system/reboot', { method: 'POST' });
+                const data = await res.json();
+                if (data.error) alert(data.error);
+                else {
+                    alert('Reboot initiated. The panel will reload in 30 seconds.');
+                    let seconds = 30;
+                    const interval = setInterval(() => {
+                        seconds--;
+                        if (seconds <= 0) {
+                            clearInterval(interval);
+                            window.location.reload();
+                        }
+                    }, 1000);
+                }
+            } catch (err) {
+                alert('Connection error');
+            }
+        }
+
         async function fetchUsers() {
             try {
                 const res = await fetch('/api/users');
@@ -2177,9 +2379,11 @@ EOF
         // Init
         fetchConfig().then(() => {
             fetchStats();
+            fetchServices();
             fetchUsers();
         });
         setInterval(fetchStats, 10000);
+        setInterval(fetchServices, 15000);
     </script>
 </body>
 </html>
