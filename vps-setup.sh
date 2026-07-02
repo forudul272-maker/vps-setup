@@ -1116,6 +1116,12 @@ EOF
             padding: 30px;
         }
 
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
         .header {
             display: flex;
             justify-content: space-between;
@@ -1255,6 +1261,12 @@ EOF
             font-weight: 600;
         }
 
+        .table-responsive {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
+
         .user-table {
             width: 100%;
             border-collapse: collapse;
@@ -1317,6 +1329,68 @@ EOF
         .btn-action.btn-delete:hover {
             background: var(--danger-color);
             border-color: var(--danger-color);
+        }
+
+        /* Mobile cards view */
+        .user-cards-list {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .user-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .user-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .user-card-name {
+            font-weight: 700;
+            font-size: 1.1rem;
+            color: var(--text-color);
+        }
+
+        .user-card-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            background: rgba(0,0,0,0.15);
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .user-card-detail-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .user-card-detail-item span:first-child {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            text-transform: uppercase;
+        }
+
+        .user-card-detail-item span:last-child {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .user-card-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 5px;
         }
 
         /* Modal styling */
@@ -1438,93 +1512,173 @@ EOF
             user-select: all;
             color: var(--text-color);
         }
+
+        /* Responsive Media Queries */
+        @media (max-width: 768px) {
+            body {
+                padding: 15px;
+            }
+            
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 15px;
+                margin-bottom: 20px;
+            }
+
+            .header-actions {
+                width: 100%;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            .header-actions .btn, .header-actions a.btn {
+                flex: 1 1 calc(50% - 10px);
+                justify-content: center;
+                padding: 10px 15px;
+                font-size: 0.85rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 10px;
+                margin-bottom: 20px;
+            }
+
+            .stat-card {
+                padding: 12px;
+                gap: 10px;
+                border-radius: 12px;
+            }
+
+            .stat-icon {
+                width: 40px;
+                height: 40px;
+                font-size: 1.2rem;
+                border-radius: 8px;
+            }
+
+            .stat-info h3 {
+                font-size: 0.7rem;
+            }
+
+            .stat-info p {
+                font-size: 1.05rem;
+            }
+
+            /* Hide table, show cards */
+            .table-responsive {
+                display: none;
+            }
+
+            .user-cards-list {
+                display: flex;
+            }
+            
+            .content-card {
+                padding: 15px;
+                border-radius: 15px;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="brand">
-            <h1>SSH-UI</h1>
-            <p>Admin Control Dashboard</p>
+    <div class="container">
+        <div class="header">
+            <div class="brand">
+                <h1>SSH-UI</h1>
+                <p>Admin Control Dashboard</p>
+            </div>
+            <div class="header-actions">
+                <button class="btn btn-secondary" onclick="fetchUsers()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+                <button class="btn" onclick="openModal('addUserModal')"><i class="fa-solid fa-plus"></i> Add User</button>
+                <button class="btn btn-secondary" onclick="openConfigModal()"><i class="fa-solid fa-gears"></i> Settings</button>
+                <a href="/logout" class="btn btn-secondary" style="text-decoration:none;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
+            </div>
         </div>
-        <div class="header-actions">
-            <button class="btn btn-secondary" onclick="fetchUsers()"><i class="fa-solid fa-rotate"></i> Refresh</button>
-            <button class="btn" onclick="openModal('addUserModal')"><i class="fa-solid fa-plus"></i> Add User</button>
-            <button class="btn btn-secondary" onclick="openConfigModal()"><i class="fa-solid fa-gears"></i> Settings</button>
-            <a href="/logout" class="btn btn-secondary" style="text-decoration:none;"><i class="fa-solid fa-right-from-bracket"></i> Logout</a>
-        </div>
-    </div>
 
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fa-solid fa-microchip"></i></div>
-            <div class="stat-info">
-                <h3>CPU Usage</h3>
-                <p id="cpu-stat">0%</p>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-microchip"></i></div>
+                <div class="stat-info">
+                    <h3>CPU Usage</h3>
+                    <p id="cpu-stat">0%</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-memory"></i></div>
+                <div class="stat-info">
+                    <h3>RAM Usage</h3>
+                    <p id="ram-stat">0%</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-hdd"></i></div>
+                <div class="stat-info">
+                    <h3>Disk Space</h3>
+                    <p id="disk-stat">0%</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon"><i class="fa-solid fa-clock"></i></div>
+                <div class="stat-info">
+                    <h3>Uptime</h3>
+                    <p id="uptime-stat">N/A</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: rgba(0, 230, 118, 0.1); color: var(--success-color);"><i class="fa-solid fa-users"></i></div>
+                <div class="stat-info">
+                    <h3>Online Users</h3>
+                    <p id="online-users-stat">0 Active</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: rgba(124, 77, 255, 0.1); color: var(--primary-color);"><i class="fa-solid fa-chart-line"></i></div>
+                <div class="stat-info">
+                    <h3>Total SSH Traffic</h3>
+                    <p id="ssh-bandwidth-stat">0 B</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color);"><i class="fa-solid fa-globe"></i></div>
+                <div class="stat-info">
+                    <h3>Total VPS Traffic</h3>
+                    <p id="vps-bandwidth-stat">0 B</p>
+                </div>
             </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fa-solid fa-memory"></i></div>
-            <div class="stat-info">
-                <h3>RAM Usage</h3>
-                <p id="ram-stat">0%</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fa-solid fa-hdd"></i></div>
-            <div class="stat-info">
-                <h3>Disk Space</h3>
-                <p id="disk-stat">0%</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon"><i class="fa-solid fa-clock"></i></div>
-            <div class="stat-info">
-                <h3>Uptime</h3>
-                <p id="uptime-stat">N/A</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon" style="background: rgba(0, 230, 118, 0.1); color: var(--success-color);"><i class="fa-solid fa-users"></i></div>
-            <div class="stat-info">
-                <h3>Online Users</h3>
-                <p id="online-users-stat">0 Active</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon" style="background: rgba(124, 77, 255, 0.1); color: var(--primary-color);"><i class="fa-solid fa-chart-line"></i></div>
-            <div class="stat-info">
-                <h3>Total SSH Traffic</h3>
-                <p id="ssh-bandwidth-stat">0 B</p>
-            </div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-icon" style="background: rgba(0, 229, 255, 0.1); color: var(--secondary-color);"><i class="fa-solid fa-globe"></i></div>
-            <div class="stat-info">
-                <h3>Total VPS Traffic</h3>
-                <p id="vps-bandwidth-stat">0 B</p>
-            </div>
-        </div>
-    </div>
 
-    <div class="content-card">
-        <div class="table-header">
-            <h2>Active SSH Users</h2>
+        <div class="content-card">
+            <div class="table-header">
+                <h2>Active SSH Users</h2>
+            </div>
+            
+            <!-- Desktop Table View -->
+            <div class="table-responsive">
+                <table class="user-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Bandwidth</th>
+                            <th>Expiry</th>
+                            <th>Status</th>
+                            <th>Active Sessions</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="user-list-body">
+                        <!-- User rows dynamically generated -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Mobile Cards View -->
+            <div id="user-cards-list" class="user-cards-list">
+                <!-- Cards dynamically generated -->
+            </div>
         </div>
-        <table class="user-table">
-            <thead>
-                <tr>
-                    <th>Username</th>
-                    <th>Bandwidth</th>
-                    <th>Expiry</th>
-                    <th>Status</th>
-                    <th>Active Sessions</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody id="user-list-body">
-                <!-- User rows dynamically generated -->
-            </tbody>
-        </table>
     </div>
 
     <!-- Add User Modal -->
@@ -1772,12 +1926,15 @@ EOF
                 const tbody = document.getElementById('user-list-body');
                 tbody.innerHTML = '';
                 
+                const cardList = document.getElementById('user-cards-list');
+                cardList.innerHTML = '';
+                
                 users.forEach(user => {
                     const tr = document.createElement('tr');
                     
                     const isExpired = user.expiry !== 'Never' && new Date(user.expiry) < new Date();
                     const expiryBadge = isExpired 
-                        ? `<span class="badge badge-danger">${user.expiry} (Expired)</span>`
+                        ? `<span class="badge badge-danger">${user.expiry}</span>`
                         : user.expiry === 'Never' 
                             ? `<span class="badge badge-success">Permanent</span>`
                             : `<span class="badge badge-warning">${user.expiry}</span>`;
@@ -1806,6 +1963,37 @@ EOF
                         </td>
                     `;
                     tbody.appendChild(tr);
+
+                    const card = document.createElement('div');
+                    card.className = 'user-card';
+                    card.innerHTML = `
+                        <div class="user-card-header">
+                            <div class="user-card-name">${user.username}</div>
+                            <div style="display:flex; gap:6px;">
+                                ${statusBadge}
+                                ${expiryBadge}
+                            </div>
+                        </div>
+                        <div class="user-card-details">
+                            <div class="user-card-detail-item">
+                                <span>Bandwidth</span>
+                                <span>${user.bandwidth || '0 B'} / ${maxBw}</span>
+                            </div>
+                            <div class="user-card-detail-item">
+                                <span>Active Sessions</span>
+                                <span>${user.sessions} / ${maxConn}</span>
+                            </div>
+                        </div>
+                        <div class="user-card-actions">
+                            <button class="btn-action" title="Share User" onclick="shareUser('${user.username}')"><i class="fa-solid fa-share-nodes"></i></button>
+                            <button class="btn-action" title="Change Password" onclick="openChpassModal('${user.username}')"><i class="fa-solid fa-key"></i></button>
+                            <button class="btn-action" title="Set Expiry" onclick="openExpiryModal('${user.username}')"><i class="fa-solid fa-calendar-days"></i></button>
+                            <button class="btn-action" title="Edit Limits" onclick="openLimitsModal('${user.username}', ${user.connection_limit}, ${user.bandwidth_limit / 1073741824})"><i class="fa-solid fa-sliders"></i></button>
+                            <button class="btn-action" title="Lock/Unlock" onclick="toggleLock('${user.username}')"><i class="fa-solid ${user.status === 'Locked' ? 'fa-lock' : 'fa-unlock'}"></i></button>
+                            <button class="btn-action btn-delete" title="Delete User" onclick="deleteUser('${user.username}')"><i class="fa-solid fa-trash"></i></button>
+                        </div>
+                    `;
+                    cardList.appendChild(card);
                 });
             } catch (err) {
                 console.error(err);
